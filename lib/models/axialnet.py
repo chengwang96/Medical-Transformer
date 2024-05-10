@@ -4,8 +4,6 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from .utils import *
-import pdb
-import matplotlib.pyplot as plt
  
 import random
 
@@ -699,7 +697,7 @@ class medt_net(nn.Module):
                 
                 x_loc[:,:,32*i:32*(i+1),32*j:32*(j+1)] = x_p
 
-        x = torch.add(x,x_loc)
+        x = torch.add(x, x_loc)
         x = F.relu(self.decoderf(x))
         
         x = self.adjust(F.relu(x))

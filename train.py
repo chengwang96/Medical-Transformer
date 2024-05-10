@@ -8,15 +8,13 @@ import torchvision
 from torch import nn
 from torch.autograd import Variable
 from torch.utils.data import DataLoader
-from torchvision import transforms
-from torchvision.utils import save_image
+from albumentations.augmentations import transforms
 import torch.nn.functional as F
 import os
 import matplotlib.pyplot as plt
 import torch.utils.data as data
 from PIL import Image
 import numpy as np
-from torchvision.utils import save_image
 import torch
 import torch.nn.init as init
 from utils import JointTransform2D, ImageToImage2D, Image2D
@@ -26,6 +24,13 @@ import cv2
 from functools import partial
 from random import randint
 import timeit
+import random
+from glob import glob
+from sklearn.model_selection import train_test_split
+from albumentations import RandomRotate90, Resize
+from albumentations.core.composition import Compose, OneOf
+from albumentations.augmentations import geometric
+
 
 parser = argparse.ArgumentParser(description='MedT')
 parser.add_argument('-j', '--workers', default=16, type=int, metavar='N',
@@ -34,7 +39,7 @@ parser.add_argument('--epochs', default=400, type=int, metavar='N',
                     help='number of total epochs to run(default: 400)')
 parser.add_argument('--start-epoch', default=0, type=int, metavar='N',
                     help='manual epoch number (useful on restarts)')
-parser.add_argument('-b', '--batch_size', default=1, type=int,
+parser.add_argument('-b', '--batch_size', default=8, type=int,
                     metavar='N', help='batch size (default: 1)')
 parser.add_argument('--learning_rate', default=1e-3, type=float,
                     metavar='LR', help='initial learning rate (default: 0.001)')
@@ -42,9 +47,10 @@ parser.add_argument('--momentum', default=0.9, type=float, metavar='M',
                     help='momentum')
 parser.add_argument('--weight-decay', '--wd', default=1e-5, type=float,
                     metavar='W', help='weight decay (default: 1e-5)')
-parser.add_argument('--train_dataset', required=True, type=str)
-parser.add_argument('--val_dataset', type=str)
-parser.add_argument('--save_freq', type=int,default = 10)
+parser.add_argument('--dataseed', default=2981, type=int)
+parser.add_argument('--input_size', default=256, type=int)
+parser.add_argument('--dataset', default='busi', type=str)
+parser.add_argument('--save_freq', type=int, default = 10)
 
 parser.add_argument('--modelname', default='MedT', type=str,
                     help='type of model')
@@ -64,17 +70,30 @@ parser.add_argument('--device', default='cuda', type=str)
 parser.add_argument('--gray', default='no', type=str)
 
 args = parser.parse_args()
+
+def seed_torch(seed=1029):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+    torch.backends.cudnn.benchmark = False
+    torch.backends.cudnn.deterministic = True
+
+seed_torch()
+
 gray_ = args.gray
 aug = args.aug
 direc = args.direc
 modelname = args.modelname
-imgsize = args.imgsize
+imgsize = args.input_size
 
 if gray_ == "yes":
     from utils_gray import JointTransform2D, ImageToImage2D, Image2D
     imgchant = 1
 else:
-    from utils import JointTransform2D, ImageToImage2D, Image2D
+    from utils import JointTransform2D, ImageToImage2D, Image2D, UNextDataset
     imgchant = 3
 
 if args.crop is not None:
@@ -82,11 +101,66 @@ if args.crop is not None:
 else:
     crop = None
 
-tf_train = JointTransform2D(crop=crop, p_flip=0.5, color_jitter_params=None, long_mask=True)
-tf_val = JointTransform2D(crop=crop, p_flip=0, color_jitter_params=None, long_mask=True)
-train_dataset = ImageToImage2D(args.train_dataset, tf_train)
-val_dataset = ImageToImage2D(args.val_dataset, tf_val)
-predict_dataset = Image2D(args.val_dataset)
+data_dir = 'data'
+dataset_name = args.dataset
+img_ext = '.png'
+if dataset_name == 'chase':
+    img_ext = '.jpg'
+
+if dataset_name == 'busi':
+    mask_ext = '_mask.png'
+elif dataset_name == 'glas':
+    mask_ext = '.png'
+elif dataset_name == 'chase':
+    mask_ext = '_1stHO.png'
+
+dataseed = args.dataseed
+print('dataseed = ' + str(dataseed))
+input_h = args.input_size
+input_w = args.input_size
+print('input_size = ' + str(args.input_size))
+num_classes = 1
+batch_size = 8
+num_workers = 4
+
+img_ids = sorted(
+    glob(os.path.join(data_dir, dataset_name, 'images', '*' + img_ext))
+)
+img_ids.sort()
+img_ids = [os.path.splitext(os.path.basename(p))[0] for p in img_ids]
+
+train_img_ids, val_img_ids = train_test_split(img_ids, test_size=0.2, random_state=dataseed)
+
+train_transform = Compose([
+    RandomRotate90(),
+    # transforms.Flip(),
+    geometric.transforms.Flip(),
+    Resize(input_h, input_w),
+    transforms.Normalize(),
+])
+
+val_transform = Compose([
+    Resize(input_h, input_w),
+    transforms.Normalize(),
+])
+
+train_dataset = UNextDataset(
+    img_ids=train_img_ids,
+    img_dir=os.path.join(data_dir, dataset_name, 'images'),
+    mask_dir=os.path.join(data_dir, dataset_name, 'masks'),
+    img_ext=img_ext,
+    mask_ext=mask_ext,
+    num_classes=num_classes,
+    transform=train_transform)
+val_dataset = UNextDataset(
+    img_ids=val_img_ids,
+    img_dir=os.path.join(data_dir ,dataset_name, 'images'),
+    mask_dir=os.path.join(data_dir, dataset_name, 'masks'),
+    img_ext=img_ext,
+    mask_ext=mask_ext,
+    num_classes=num_classes,
+    transform=val_transform)
+
 dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
 valloader = DataLoader(val_dataset, 1, shuffle=True)
 
@@ -108,9 +182,7 @@ if torch.cuda.device_count() > 1:
 model.to(device)
 
 criterion = LogNLLLoss()
-optimizer = torch.optim.Adam(list(model.parameters()), lr=args.learning_rate,
-                             weight_decay=1e-5)
-
+optimizer = torch.optim.Adam(list(model.parameters()), lr=args.learning_rate, weight_decay=1e-5)
 
 pytorch_total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
 print("Total_params: {}".format(pytorch_total_params))
@@ -123,37 +195,55 @@ torch.cuda.manual_seed(seed)
 # random.seed(seed)
 
 
-for epoch in range(args.epochs):
+def iou_score(output, target):
+    smooth = 1e-5
 
-    epoch_running_loss = 0
+    if torch.is_tensor(output):
+        output = torch.sigmoid(output).data.cpu().numpy()
+    if torch.is_tensor(target):
+        target = target.data.cpu().numpy()
+    output_ = output > 0.5
+    target_ = target > 0.5
+    intersection = (output_ & target_).sum()
+    union = (output_ | target_).sum()
+    iou = (intersection + smooth) / (union + smooth)
+    dice = (2* iou) / (iou+1)
+
+    try:
+        hd95_ = hd95(output_, target_)
+    except:
+        hd95_ = 0
     
-    for batch_idx, (X_batch, y_batch, *rest) in enumerate(dataloader):        
-        
-        
+    return iou, dice, hd95_
 
+
+class AverageMeter(object):
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val, n=1):
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
+
+best_iou, best_dice, best_hd95 = 0, 0, 0
+for epoch in range(args.epochs):
+    epoch_running_loss = 0
+    for batch_idx, (X_batch, y_batch, *rest) in enumerate(dataloader):        
+    
         X_batch = Variable(X_batch.to(device ='cuda'))
         y_batch = Variable(y_batch.to(device='cuda'))
         
         # ===================forward=====================
-        
-
         output = model(X_batch)
-
-        tmp2 = y_batch.detach().cpu().numpy()
-        tmp = output.detach().cpu().numpy()
-        tmp[tmp>=0.5] = 1
-        tmp[tmp<0.5] = 0
-        tmp2[tmp2>0] = 1
-        tmp2[tmp2<=0] = 0
-        tmp2 = tmp2.astype(int)
-        tmp = tmp.astype(int)
-
-        yHaT = tmp
-        yval = tmp2
-
-        
-
-        loss = criterion(output, y_batch)
+        loss = criterion(output, y_batch.squeeze().contiguous().long())
         
         # ===================backward====================
         optimizer.zero_grad()
@@ -162,59 +252,43 @@ for epoch in range(args.epochs):
         epoch_running_loss += loss.item()
         
     # ===================log========================
-    print('epoch [{}/{}], loss:{:.4f}'
-          .format(epoch, args.epochs, epoch_running_loss/(batch_idx+1)))
-
+    print('epoch [{}/{}], loss:{:.4f}'.format(epoch, args.epochs, epoch_running_loss/(batch_idx+1)))
     
     if epoch == 10:
         for param in model.parameters():
             param.requires_grad =True
-    if (epoch % args.save_freq) ==0:
+        
+    if (epoch % args.save_freq) == 0:
+        iou_avg_meter = AverageMeter()
+        dice_avg_meter = AverageMeter()
+        hd95_avg_meter = AverageMeter()
 
         for batch_idx, (X_batch, y_batch, *rest) in enumerate(valloader):
-            # print(batch_idx)
-            if isinstance(rest[0][0], str):
-                        image_filename = rest[0][0]
-            else:
-                        image_filename = '%s.png' % str(batch_idx + 1).zfill(3)
-
             X_batch = Variable(X_batch.to(device='cuda'))
             y_batch = Variable(y_batch.to(device='cuda'))
             # start = timeit.default_timer()
             y_out = model(X_batch)
-            # stop = timeit.default_timer()
-            # print('Time: ', stop - start) 
-            tmp2 = y_batch.detach().cpu().numpy()
-            tmp = y_out.detach().cpu().numpy()
-            tmp[tmp>=0.5] = 1
-            tmp[tmp<0.5] = 0
-            tmp2[tmp2>0] = 1
-            tmp2[tmp2<=0] = 0
-            tmp2 = tmp2.astype(int)
-            tmp = tmp.astype(int)
+            iou, dice, hd95_ = iou_score(y_out[:, 1, :, :], y_batch)
+            iou_avg_meter.update(iou, X_batch.size(0))
+            dice_avg_meter.update(dice, X_batch.size(0))
+            hd95_avg_meter.update(hd95_, X_batch.size(0))
 
-            # print(np.unique(tmp2))
-            yHaT = tmp
-            yval = tmp2
+        if iou_avg_meter.avg > best_iou:
+            best_iou = iou_avg_meter.avg
+            best_dice = dice_avg_meter.avg
+            best_hd95 = hd95_avg_meter.avg
+            print('New best model')
+            print('IoU: %.4f' % best_iou)
+            print('Dice: %.4f' % best_dice)
+            print('HD95: %.4f' % best_hd95)
 
-            epsilon = 1e-20
-            
-            del X_batch, y_batch,tmp,tmp2, y_out
+            if not os.path.exists(direc):
+                os.mkdir(direc)
+            torch.save(model.state_dict(), os.path.join(direc, '{}.pth'.format(epoch)))
 
-            
-            yHaT[yHaT==1] =255
-            yval[yval==1] =255
-            fulldir = direc+"/{}/".format(epoch)
-            # print(fulldir+image_filename)
-            if not os.path.isdir(fulldir):
-                
-                os.makedirs(fulldir)
-            
-            cv2.imwrite(fulldir+image_filename, yHaT[0,1,:,:])
-            # cv2.imwrite(fulldir+'/gt_{}.png'.format(count), yval[0,:,:])
-        fulldir = direc+"/{}/".format(epoch)
-        torch.save(model.state_dict(), fulldir+args.modelname+".pth")
         torch.save(model.state_dict(), direc+"final_model.pth")
-            
 
-
+print('finish')
+print('IoU: %.4f' % best_iou)
+print('Dice: %.4f' % best_dice)
+print('HD95: %.4f' % best_hd95)
